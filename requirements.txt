@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+opencv-python
+numpy
+pandas
+joblib
+scikit-learn
+ultralytics
+python-multipart
+#pip install python-multipart
+# pip install mediapipe
+#pip install ultralytics
+#pip install joblib
+#pip install pandas
+# pip install scikit-learn
