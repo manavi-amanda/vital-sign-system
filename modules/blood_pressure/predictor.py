@@ -38,7 +38,7 @@ except Exception as e:
 # ---------------------------
 # PREDICTION FUNCTION
 # ---------------------------
-def predict_blood_pressure(body_temp, heart_rate, age):
+def predict_blood_pressure(body_temp, heart_rate, age: None):
 
     try:
         # ---------------------------
