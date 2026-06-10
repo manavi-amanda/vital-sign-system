@@ -1,6 +1,9 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 import tempfile
 import os
+from modules.respiratory.video_processor import process_video
+from modules.heart_rate.hr_estimator import estimate_heart_rate
+from modules.blood_pressure.predictor import predict_blood_pressure
 
 router = APIRouter()
 
@@ -15,9 +18,7 @@ async def analyze_video(file: UploadFile = File(...)):
 
     try:
         # IMPORT INSIDE FUNCTION
-        from modules.respiratory.video_processor import process_video
-        from modules.heart_rate.hr_estimator import estimate_heart_rate
-        from modules.blood_pressure.predictor import predict_blood_pressure
+        
 
         file_bytes = await file.read()
 
@@ -84,51 +85,52 @@ async def analyze_vitallens(
             if os.path.exists(temp_video_path):
                 os.remove(temp_video_path)
 
-        # vl_result = process_vitallens(file_bytes, api_key=api_key, suffix=suffix)
-        #
-        # hr_rgb = vl_result.get("heart_rate")
-        # rr_bpm = vl_result.get("respiratory_rate")
-        #
-        # if hr_rgb is None or rr_bpm is None:
-        #     raise HTTPException(
-        #         status_code=422,
-        #         detail="VitalLens could not detect HR or RR — check lighting and face visibility."
-        #     )
-        #
-        # # ── Step 2 & 3: Hybrid HR ───────────────────────────────────────────
-        # hr_result = estimate_hybrid_heart_rate(
-        #     hr_rgb=hr_rgb,
-        #     rr_bpm=rr_bpm,
-        #     x=hybrid_x,
-        # )
+        vl_result = process_vitallens(file_bytes, api_key=api_key, suffix=suffix)
+        
+        hr_rgb = vl_result.get("heart_rate")
+        rr_bpm = vl_result.get("respiratory_rate")
+        
+        if hr_rgb is None or rr_bpm is None:
+            raise HTTPException(
+                status_code=422,
+                detail="VitalLens could not detect HR or RR — check lighting and face visibility."
+            )
+        
+        # ── Step 2 & 3: Hybrid HR ───────────────────────────────────────────
+        hr_result = estimate_hybrid_heart_rate(
+            hr_rgb=hr_rgb,
+            rr_bpm=rr_bpm,
+            x=hybrid_x,
+        )
 
-        # ── Step 4: Blood pressure (reuse existing predictor) ───────────────
-        # bp_result = predict_blood_pressure(
-        #     body_temp=37.0,  # VitalLens doesn't provide temp;
-        #     heart_rate=hr_result["hr_estimated"],  # use clinical default 37 °C
-        # )
+        #── Step 4: Blood pressure (reuse existing predictor) ───────────────
+        bp_result = predict_blood_pressure(
+            body_temp=37.0,  # VitalLens doesn't provide temp;
+            heart_rate=hr_result["hr_estimated"], 
+            age=detected_age  # use clinical default 37 °C
+        )
 
         return {
             # Core vitals
-            # "heart_rate": hr_result["hr_estimated"],
-            # "respiratory_rate": round(rr_bpm, 2),
-            # "hrv_sdnn_ms": vl_result.get("hrv_sdnn"),
+            "heart_rate": hr_result["hr_estimated"],
+            "respiratory_rate": round(rr_bpm, 2),
+            "hrv_sdnn_ms": vl_result.get("hrv_sdnn"),
 
             "age": detected_age,
 
-            # Hybrid breakdown
-            # "hybrid_detail": {
-            #     "hr_rgb": hr_result["hr_rgb"],
-            #     "hr_resp": hr_result["hr_resp"],
-            #     "hybrid_x": hr_result["hybrid_x"],
-            #     "source": hr_result["source"],
-            # },
-            #
-            # # Signal quality
-            # "confidence": {
-            #     "hr": vl_result.get("hr_confidence"),
-            #     "rr": vl_result.get("rr_confidence"),
-            # },
+            #Hybrid breakdown
+            "hybrid_detail": {
+                "hr_rgb": hr_result["hr_rgb"],
+                "hr_resp": hr_result["hr_resp"],
+                "hybrid_x": hr_result["hybrid_x"],
+                "source": hr_result["source"],
+            },
+            
+            # Signal quality
+            "confidence": {
+                "hr": vl_result.get("hr_confidence"),
+                "rr": vl_result.get("rr_confidence"),
+            },
         }
 
     except HTTPException:
