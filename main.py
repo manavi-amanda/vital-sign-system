@@ -22,6 +22,9 @@ from datetime import datetime
 from modules.respiratory.video_processor import process_video
 from modules.heart_rate.hr_estimatorV2 import estimate_heart_rate
 from modules.blood_pressure.predictor import predict_blood_pressure
+from modules.heart_rate.vitals_api import process_vitallens
+from modules.heart_rate.hr_estimatorV2 import estimate_hybrid_heart_rate
+from modules.age_detector.age_detector import detect_age
 
 LOG_FILE = "output_logs.jsonl"
 
@@ -68,7 +71,6 @@ def capture_rtsp_to_file(rtsp_url, duration_sec=10, output_path="output.mp4"):
     out.release()
 
     print(f"[INFO] Saved video: {output_path}")
-    log("[INFO] Recording RTSP for 10 seconds...")
     return output_path
 
 
@@ -126,6 +128,92 @@ def run_pipeline(video_path):
 
     log_run(final_output)
 
+def run_rgb_pipeline(video_path, api_key, hybrid_x=0.0):
+
+    print("\n========== RGB PIPELINE START ==========")
+
+    if not (0.0 <= hybrid_x <= 1.0):
+        raise Exception("hybrid_x must be between 0 and 1")
+
+    # Read video
+    with open(video_path, "rb") as f:
+        file_bytes = f.read()
+
+    suffix = "." + video_path.split(".")[-1]
+
+    # Step 1 - Age Detection
+    #detected_age = detect_age(video_path)
+
+    # print("\n[AGE RESULT]")
+    # print({"age": detected_age})
+
+    # Step 2 - VitalLens Analysis
+    vl_result = process_vitallens(
+        file_bytes,
+        api_key=api_key,
+        suffix=suffix
+    )
+
+    print("\n[VITALLENS RESULT]")
+    print(vl_result)
+
+    hr_rgb = vl_result.get("heart_rate")
+    rr_bpm = vl_result.get("respiratory_rate")
+
+    if hr_rgb is None or rr_bpm is None:
+        raise Exception(
+            "VitalLens could not detect HR or RR. Check lighting and face visibility."
+        )
+
+    # Step 3 - Hybrid HR
+    hr_result = estimate_hybrid_heart_rate(
+        hr_rgb=hr_rgb,
+        rr_bpm=rr_bpm,
+        x=hybrid_x
+    )
+
+    print("\n[HYBRID HEART RATE RESULT]")
+    print(hr_result)
+
+    # Step 4 - Blood Pressure
+    # bp_result = predict_blood_pressure(
+    #     body_temp=37.0,
+    #     heart_rate=hr_result["hr_estimated"],
+    #     age=detected_age
+    # )
+
+    # print("\n[BLOOD PRESSURE RESULT]")
+    # print(bp_result)
+
+    final_output = {
+        "heart_rate": hr_result["hr_estimated"],
+        "respiratory_rate": round(rr_bpm, 2),
+        "hrv_sdnn_ms": vl_result.get("hrv_sdnn"),
+        # "age": detected_age,
+
+        "hybrid_detail": {
+            "hr_rgb": hr_result["hr_rgb"],
+            "hr_resp": hr_result["hr_resp"],
+            "hybrid_x": hr_result["hybrid_x"],
+            "source": hr_result["source"]
+        },
+
+        "confidence": {
+            "hr": vl_result.get("hr_confidence"),
+            "rr": vl_result.get("rr_confidence")
+        },
+
+        # "blood_pressure": bp_result["bp_category"]
+    }
+
+    print("\n========== RGB FINAL OUTPUT ==========")
+    print(final_output)
+    print("======================================\n")
+
+    log_run(final_output)
+
+    return final_output
+
 
 # ==============================
 # ENTRY POINT
@@ -142,7 +230,13 @@ if __name__ == "__main__":
     )
 
     # 2. Run pipeline
-    run_pipeline(video_file)
+    # run_pipeline(video_file)
+
+    run_rgb_pipeline(
+        video_file,
+        api_key="89aKf6HU8V8b9UpzF7E7b9ZsUffMbSoo9J7ptXYE",
+        hybrid_x=0.0
+    )
 
     # 3. Cleanup (optional)
     if os.path.exists(video_file):
