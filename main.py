@@ -1,149 +1,108 @@
-# from fastapi import FastAPI
-# from app.routes import router
-# from fastapi.middleware.cors import CORSMiddleware
-
-# app = FastAPI()
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-# app.include_router(router)
-
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 import cv2
-import tempfile
-import os
-from datetime import datetime
+import time
 
-from modules.respiratory.video_processor import process_video
-from modules.heart_rate.hr_estimatorV2 import estimate_heart_rate
-from modules.blood_pressure.predictor import predict_blood_pressure
+import state
+from stream import connect, disconnect
 
-LOG_FILE = "output_logs.jsonl"
+app = FastAPI()
 
+# Allow Electron to access the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-import json
-from datetime import datetime
-
-def log_run(data: dict):
-    data["timestamp"] = datetime.now().isoformat()
-
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(data) + "\n")
-
-# ==============================
-# RTSP / VIDEO CAPTURE FUNCTION
-# ==============================
-def capture_rtsp_to_file(rtsp_url, duration_sec=10, output_path="output.mp4"):
-    cap = cv2.VideoCapture(rtsp_url)
-
-    if not cap.isOpened():
-        raise Exception("Cannot open RTSP stream")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-    frame_count = int(duration_sec * fps)
-    i = 0
-
-    print(f"[INFO] Recording RTSP for {duration_sec} seconds...")
-
-    while i < frame_count:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        out.write(frame)
-        i += 1
-
-    cap.release()
-    out.release()
-
-    print(f"[INFO] Saved video: {output_path}")
-    log("[INFO] Recording RTSP for 10 seconds...")
-    return output_path
+# Request Model
+class ConnectRequest(BaseModel):
+    rtspUrl: str
 
 
-# ==============================
-# MAIN PIPELINE (YOUR POC LOGIC)
-# ==============================
-def run_pipeline(video_path):
-    print("\n========== PIPELINE START ==========")
+# Connect Camera
+@app.post("/connect")
+def connect_camera(req: ConnectRequest):
 
-    with open(video_path, "rb") as f:
-        file_bytes = f.read()
+    print("REQUEST RECEIVED")
+    result = connect(req.rtspUrl)
+    print("RETURNING RESPONSE")
 
-    # Step 1: Respiratory + temp + bpm
-    result = process_video(file_bytes)
-
-    print("\n[RESPIRATORY RESULT]")
-    print(result)
-
-    if not result or "final_bpm" not in result:
-        raise Exception("RR analysis failed")
-
-    # Step 2: Heart rate estimation
-    hr_result = estimate_heart_rate(result["final_bpm"])
-    print("\n[HEART RATE RESULT]")
-    print(hr_result)
-
-    # Step 3: Blood pressure prediction
-    bp_result = predict_blood_pressure(
-        body_temp=float(result["body_temperature"]["temp_c_estimate"]),
-        heart_rate=float(hr_result["hr_estimated"]),
-        age=None
-    )
-
-    print("\n[BLOOD PRESSURE RESULT]")
-    print(bp_result)
-
-    # FINAL OUTPUT
-    print("\n========== FINAL OUTPUT ==========")
-    print({
-        "bpm": result["final_bpm"],
-        "body_temperature": result["body_temperature"]["temp_c_estimate"],
-        "heart_rate": hr_result["hr_estimated"],
-        "blood_pressure": bp_result["bp_category"]
-    })
-
-    print("==================================\n")
-
-
-    final_output = {
-        "bpm": result["final_bpm"],
-        "body_temperature": result["body_temperature"]["temp_c_estimate"],
-        "heart_rate": hr_result["hr_estimated"],
-        "blood_pressure": bp_result["bp_category"]
+    return {
+        "connected": result,
+        "status": "starting"
     }
 
-    log_run(final_output)
+
+# Disconnect Camera
+
+@app.post("/disconnect")
+def disconnect_camera():
+
+    disconnect()
+    return {
+        "connected": False
+    }
 
 
-# ==============================
-# ENTRY POINT
-# ==============================
-if __name__ == "__main__":
+# Connection Status
+@app.get("/status")
+def status():
 
-    RTSP_URL = "rtsp://admin:admin123@172.20.10.4:8554/streaming/live/1"
+    return {
+        "connected": state.connected,
+        "running": state.running,
+        "result": state.latest_result
+    }
 
-    # 1. Capture RTSP → video file
-    video_file = capture_rtsp_to_file(
-        RTSP_URL,
-        duration_sec=30,
-        output_path="output.mp4"
+# Live Video Stream
+def generate():
+
+    while True:
+
+        if not state.connected:
+            time.sleep(0.1)
+            continue
+
+        if state.latest_frame is None:
+            time.sleep(0.01)
+            continue
+
+        success, buffer = cv2.imencode(
+            ".jpg",
+            state.latest_frame
+        )
+
+        if not success:
+            continue
+
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n'
+            + buffer.tobytes()
+            + b'\r\n'
+        )
+
+
+@app.get("/video")
+def video():
+
+    return StreamingResponse(
+
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+
     )
 
-    # 2. Run pipeline
-    run_pipeline(video_file)
+# Health Check
 
-    # 3. Cleanup (optional)
-    if os.path.exists(video_file):
-        os.remove(video_file)
+@app.get("/")
+def root():
+
+    return {
+        "message": "RTSP Backend Running"
+    }
