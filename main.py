@@ -234,7 +234,7 @@ if __name__ == "__main__":
 
     run_rgb_pipeline(
         video_file,
-        api_key="89aKf6HU8V8b9UpzF7E7b9ZsUffMbSoo9J7ptXYE",
+        api_key="api_key",
         hybrid_x=0.0
     )
 
