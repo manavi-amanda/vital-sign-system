@@ -6,7 +6,7 @@ import time
 import copy
 
 import state
-from processor import run_pipeline
+from processor import run_pipeline, run_rgb_pipeline
 
 cap = None
 frame_lock = threading.Lock()
@@ -76,7 +76,8 @@ def pipeline_worker():
 
     while state.running:
 
-        if cap is None:
+        if not state.pipeline_running:
+            time.sleep(0.5)
             continue
 
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -85,6 +86,8 @@ def pipeline_worker():
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
+
+        pipeline_type = state.pipeline_type  # SNAPSHOT
 
         temp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         filename = temp.name
@@ -99,11 +102,12 @@ def pipeline_worker():
 
         frame_count = int(fps * 10)
 
-        print("[INFO] Recording 10 seconds for pipeline...")
-
         recorded = 0
 
         while recorded < frame_count and state.running:
+
+            if not state.pipeline_running:
+                break
 
             with frame_lock:
                 frame = None if latest_frame_local is None else latest_frame_local.copy()
@@ -116,13 +120,19 @@ def pipeline_worker():
 
         writer.release()
 
-        print("[INFO] Processing pipeline...")
+        if not state.pipeline_running:
+            os.remove(filename)
+            continue
 
-        try:
+        if pipeline_type == "thermal":
             run_pipeline(filename)
 
-        except Exception as e:
-            print("[PIPELINE ERROR]", e)
+        elif pipeline_type == "rgb":
+            run_rgb_pipeline(
+                filename,
+                api_key="api key",
+                hybrid_x=0.0
+            )
 
         if os.path.exists(filename):
             os.remove(filename)

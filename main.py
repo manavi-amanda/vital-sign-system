@@ -23,6 +23,9 @@ app.add_middleware(
 class ConnectRequest(BaseModel):
     rtspUrl: str
 
+class PipelineRequest(BaseModel):
+    pipelineType: str
+
 
 # Connect Camera
 @app.post("/connect")
@@ -35,6 +38,23 @@ def connect_camera(req: ConnectRequest):
     return {
         "connected": result,
         "status": "starting"
+    }
+
+@app.post("/start-pipeline")
+def start_pipeline(req: PipelineRequest):
+
+    if state.pipeline_running:
+        return {
+            "started": False,
+            "reason": "Pipeline already running"
+        }
+
+    state.pipeline_type = req.pipelineType
+    state.pipeline_running = True
+
+    return {
+        "started": True,
+        "pipeline": state.pipeline_type
     }
 
 
@@ -55,7 +75,7 @@ def status():
 
     return {
         "connected": state.connected,
-        "running": state.running,
+        "running": state.pipeline_running,
         "result": state.latest_result
     }
 
@@ -98,6 +118,18 @@ def video():
 
     )
 
+
+@app.post("/reset-pipeline")
+def reset_pipeline():
+
+    state.pipeline_running = False
+    state.pipeline_type = None
+
+    time.sleep(0.2)  # allow worker to exit safely
+
+    state.latest_result.clear()
+
+    return {"reset": True}
 # Health Check
 
 @app.get("/")
