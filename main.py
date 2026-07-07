@@ -68,15 +68,35 @@ def disconnect_camera():
         "connected": False
     }
 
+class ModeRequest(BaseModel):
+    mode: int
+
+
+@app.post("/set-mode")
+def set_mode(req: ModeRequest):
+
+    state.mode = req.mode
+
+    return {
+        "mode": state.mode
+    }
+
 
 # Connection Status
 @app.get("/status")
 def status():
 
+    result = state.latest_result.copy()
+
+    # One-time notification
+    if result.get("thermal_completed"):
+        state.latest_result.clear()
+
     return {
         "connected": state.connected,
         "running": state.pipeline_running,
-        "result": state.latest_result
+        "result": result,
+        "pipeline": state.pipeline_type
     }
 
 # Live Video Stream

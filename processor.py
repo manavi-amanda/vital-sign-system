@@ -19,6 +19,81 @@ def log_run(data: dict):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(data) + "\n")
 
+def determine_human_status(heart_rate, respiration_rate, body_temperature):
+    """
+    Determine human status based on estimated vital signs.
+
+    NOTE:
+    This function DOES NOT determine death.
+    It only reports whether vital signs are detected.
+    """
+
+    reasons = []
+    confidence = 0.0
+
+    if heart_rate is not None:
+        try:
+            heart_rate = float(heart_rate)
+
+            if heart_rate >= 20:
+                confidence += 0.6
+                reasons.append(f"Heart rate detected ({heart_rate:.1f} bpm)")
+            else:
+                reasons.append("Heart rate extremely low or not detected")
+
+        except:
+            heart_rate = None
+
+    else:
+        reasons.append("Heart rate unavailable")
+
+    if respiration_rate is not None:
+        try:
+            respiration_rate = float(respiration_rate)
+
+            if respiration_rate >= 4:
+                confidence += 0.3
+                reasons.append(f"Respiration detected ({respiration_rate:.1f} bpm)")
+            else:
+                reasons.append("Respiration extremely low or not detected")
+
+        except:
+            respiration_rate = None
+
+    else:
+        reasons.append("Respiration unavailable")
+
+    if body_temperature is not None:
+        try:
+            body_temperature = float(body_temperature)
+
+            if body_temperature >= 30:
+                confidence += 0.1
+                reasons.append(f"Body temperature {body_temperature:.1f}°C")
+
+        except:
+            body_temperature = None
+
+    if confidence >= 0.7:
+        status = "Alive"
+
+    elif confidence >= 0.3:
+        status = "Likely Alive"
+
+    elif confidence > 0:
+        status = "No Detectable Vital Signs"
+
+    else:
+        status = "Unable to Determine"
+
+    return {
+        "status": status,
+        "confidence": round(confidence, 2),
+        "reason": reasons
+    }
+
+
+
 
 def run_pipeline(video_path):
     """
@@ -53,6 +128,12 @@ def run_pipeline(video_path):
         age=None
     )
 
+    human_status = determine_human_status(
+        heart_rate=hr_result["hr_estimated"],
+        respiration_rate=result["final_bpm"],
+        body_temperature=result["body_temperature"]["temp_c_estimate"]
+    )
+
     print("\n[BLOOD PRESSURE RESULT]")
     print(bp_result)
 
@@ -60,7 +141,8 @@ def run_pipeline(video_path):
         "bpm": result["final_bpm"],
         "body_temperature": result["body_temperature"]["temp_c_estimate"],
         "heart_rate": hr_result["hr_estimated"],
-        "blood_pressure": bp_result["bp_category"]
+        "blood_pressure": bp_result["bp_category"],
+        "human_status": human_status
     }
 
     print("\n========== FINAL OUTPUT ==========")
@@ -68,8 +150,22 @@ def run_pipeline(video_path):
     print("=================================\n")
 
     # Save for FastAPI
-    state.latest_result.clear()
-    state.latest_result.update(final_output)
+    if state.mode == 1:
+
+        state.latest_result.clear()
+        state.latest_result.update(final_output)
+
+    else:
+
+        state.thermal_result = final_output.copy()
+
+        state.latest_result.clear()
+
+        state.latest_result.update({
+
+            "thermal_completed": True
+
+        })
 
     # Log to file
     log_run(final_output.copy())
@@ -123,11 +219,24 @@ def run_rgb_pipeline(video_path, api_key, hybrid_x=0.0):
     print("\n[HYBRID HEART RATE RESULT]")
     print(hr_result)
 
+    thermal_temp = 37.0
+    thermal_resp = rr_bpm
+
+    if state.mode == 2 and state.thermal_result is not None:
+        thermal_temp = float(state.thermal_result["body_temperature"])
+        thermal_resp = float(state.thermal_result["bpm"])
+
     # Step 4 - Blood Pressure
     bp_result = predict_blood_pressure(
-        body_temp=37.0,
+        body_temp=thermal_temp,
         heart_rate=hr_result["hr_estimated"],
         age=detected_age
+    )
+
+    human_status = determine_human_status(
+        heart_rate=hr_result["hr_estimated"],
+        respiration_rate=thermal_resp,
+        body_temperature=thermal_temp
     )
 
     # print("\n[BLOOD PRESSURE RESULT]")
@@ -152,15 +261,33 @@ def run_rgb_pipeline(video_path, api_key, hybrid_x=0.0):
         #     "rr": vl_result.get("rr_confidence")
         # },
 
-        "blood_pressure": bp_result["bp_category"]
+        "blood_pressure": bp_result["bp_category"],
+        "human_status": human_status
     }
 
     print("\n========== RGB FINAL OUTPUT ==========")
     print(final_output)
     print("======================================\n")
 
-    state.latest_result.clear()
-    state.latest_result.update(final_output)
+    if state.mode == 1:
+
+        state.latest_result.clear()
+        state.latest_result.update(final_output)
+
+    else:
+
+        combined_output = {
+            "body_temperature": thermal_temp,
+            "bpm": thermal_resp,
+            "heart_rate": hr_result["hr_estimated"],
+            "blood_pressure": bp_result["bp_category"],
+            "human_status": human_status
+        }
+
+        state.latest_result.clear()
+
+        state.latest_result.update(combined_output)
+
 
     log_run(final_output.copy())
 

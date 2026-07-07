@@ -12,3 +12,7 @@ pipeline_type = None
 
 pipeline_lock = False
 pipeline_request_id = 0
+
+mode = 1
+
+thermal_result = None
