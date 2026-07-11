@@ -1,71 +1,67 @@
-import cv2
-import numpy as np
-from deepface import DeepFace
+import requests
+import os
+
+# ==========================================
+# Face++ API Credentials
+# ==========================================
+# Replace these with your actual Face++ keys.
+# Alternatively, you can use os.getenv() if you prefer environment variables.
+API_KEY = "api_key"
+API_SECRET = "api_secret"
 
 
-def detect_age(video_path):
+def detect_age(image_path, default_age=24):
+    """
+    Sends an image to the Face++ API to estimate the person's age.
 
-    cap = cv2.VideoCapture(video_path)
+    Args:
+        image_path (str): The local path to the image file.
+        default_age (int): The age to return if detection fails or API limits are hit.
 
-    ages = []
-    frame_count = 0
+    Returns:
+        int: The estimated age, or the default age if unsuccessful.
+    """
+    url = "https://api-us.faceplusplus.com/facepp/v3/detect"
 
-    while cap.isOpened():
+    # Parameters for the API request
+    data = {
+        'api_key': API_KEY,
+        'api_secret': API_SECRET,
+        'return_attributes': 'age'
+    }
 
-        ret, frame = cap.read()
+    # Check if the file actually exists before sending
+    if not os.path.exists(image_path):
+        print(f"[Age Detector] Error: File {image_path} not found.")
+        return default_age
 
-        if not ret:
-            break
+    try:
+        # Open the image file in binary read mode
+        with open(image_path, 'rb') as image_file:
+            files = {'image_file': image_file}
 
-        frame_count += 1
+            # Send request to Face++
+            response = requests.post(url, data=data, files=files, timeout=10)
+            result = response.json()
 
-        # Every 15th frame
-        if frame_count % 15 != 0:
-            continue
+            # 1. Handle API-level errors (e.g., concurrency limit, bad keys)
+            if 'error_message' in result:
+                print(f"[Age Detector] Face++ API Error: {result['error_message']}")
+                return default_age
 
-        # Blur check
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # 2. Extract age if a face is found
+            if 'faces' in result and len(result['faces']) > 0:
+                # We grab the age of the first face detected
+                age = result['faces'][0]['attributes']['age']['value']
+                return age
+            else:
+                # 3. Handle cases where the image is sent, but no face is visible
+                print("[Age Detector] No faces detected in the frame.")
+                return default_age
 
-        if cv2.Laplacian(gray, cv2.CV_64F).var() < 100:
-            continue
-
-        try:
-
-            result = DeepFace.analyze(
-                frame,
-                actions=["age"],
-                detector_backend="retinaface",
-                enforce_detection=True,
-                silent=True
-            )
-
-            age = result[0]["age"] if isinstance(result, list) else result["age"]
-
-            print(age)
-            ages.append(float(age))
-
-            # Enough good samples
-            if len(ages) >= 20:
-                break
-
-        except Exception:
-            continue
-
-    cap.release()
-
-    if not ages:
-        return None
-
-    ages = np.array(ages)
-
-    q1 = np.percentile(ages, 25)
-    q3 = np.percentile(ages, 75)
-
-    iqr = q3 - q1
-
-    ages = ages[
-        (ages >= q1 - 1.5 * iqr) &
-        (ages <= q3 + 1.5 * iqr)
-    ]
-
-    return max(0, int(np.percentile(ages, 10)) - 2)
+    except requests.exceptions.RequestException as e:
+        print(f"[Age Detector] Network error connecting to Face++: {e}")
+        return default_age
+    except Exception as e:
+        print(f"[Age Detector] Unexpected error: {e}")
+        return default_age

@@ -6,7 +6,10 @@ pandas
 joblib
 scikit-learn
 ultralytics
+requests
 python-multipart
+aiortc
+av
 #pip install python-multipart
 # pip install mediapipe
 #pip install ultralytics

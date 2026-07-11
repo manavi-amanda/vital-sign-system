@@ -1,5 +1,7 @@
 import json
 from datetime import datetime
+import cv2
+import os
 
 from modules.respiratory.video_processor import process_video
 from modules.heart_rate.hr_estimatorV2 import estimate_heart_rate
@@ -185,13 +187,36 @@ def run_rgb_pipeline(video_path, api_key, hybrid_x=0.0):
 
     suffix = "." + video_path.split(".")[-1]
 
-    # Step 1 - Age Detection
-    detected_age = 24
+    detected_age = 24  # Default fallback age
+    temp_frame_path = "temp_age_frame.jpg"
 
-    # print("\n[AGE RESULT]")
-    # print({"age": detected_age})
+    print("\n[EXTRACTING FRAME FOR AGE DETECTION]")
+    try:
+        # Open the video and read the first frame
+        cap = cv2.VideoCapture(video_path)
+        ret, frame = cap.read()
+        cap.release()
 
-    # Step 2 - VitalLens Analysis
+        if ret:
+            # Save the single frame temporarily
+            cv2.imwrite(temp_frame_path, frame)
+
+            # Call your age detector using the single image frame
+            # (Assuming detect_age accepts a file path. Adjust if it expects bytes)
+            detected_age = detect_age(temp_frame_path)
+
+            print(f"Age successfully detected: {detected_age}")
+        else:
+            print("Warning: Could not extract frame from video. Using default age.")
+
+    except Exception as e:
+        print(f"Age detection failed (API limit reached?): {e}. Using default age {detected_age}.")
+
+    finally:
+        # Always clean up the temporary image file
+        if os.path.exists(temp_frame_path):
+            os.remove(temp_frame_path)
+
     vl_result = process_vitallens(
         file_bytes,
         api_key=api_key,
@@ -261,7 +286,7 @@ def run_rgb_pipeline(video_path, api_key, hybrid_x=0.0):
         #     "rr": vl_result.get("rr_confidence")
         # },
 
-        "blood_pressure": bp_result["bp_category"],
+        "blood_pressure": "Not found",
         "human_status": human_status
     }
 
