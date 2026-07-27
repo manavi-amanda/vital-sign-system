@@ -1,149 +1,199 @@
-# from fastapi import FastAPI
-# from app.routes import router
-# from fastapi.middleware.cors import CORSMiddleware
-
-# app = FastAPI()
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-# app.include_router(router)
-
+import asyncio
+import fractions
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from av import VideoFrame
 import cv2
-import tempfile
-import os
-from datetime import datetime
+import time
 
-from modules.respiratory.video_processor import process_video
-from modules.heart_rate.hr_estimatorV2 import estimate_heart_rate
-from modules.blood_pressure.predictor import predict_blood_pressure
+import state
+from stream import connect, disconnect
 
-LOG_FILE = "output_logs.jsonl"
+app = FastAPI()
 
+# Allow Electron to access the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-import json
-from datetime import datetime
-
-def log_run(data: dict):
-    data["timestamp"] = datetime.now().isoformat()
-
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(data) + "\n")
-
-# ==============================
-# RTSP / VIDEO CAPTURE FUNCTION
-# ==============================
-def capture_rtsp_to_file(rtsp_url, duration_sec=10, output_path="output.mp4"):
-    cap = cv2.VideoCapture(rtsp_url)
-
-    if not cap.isOpened():
-        raise Exception("Cannot open RTSP stream")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-    frame_count = int(duration_sec * fps)
-    i = 0
-
-    print(f"[INFO] Recording RTSP for {duration_sec} seconds...")
-
-    while i < frame_count:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        out.write(frame)
-        i += 1
-
-    cap.release()
-    out.release()
-
-    print(f"[INFO] Saved video: {output_path}")
-    log("[INFO] Recording RTSP for 10 seconds...")
-    return output_path
+pcs = set()
 
 
-# ==============================
-# MAIN PIPELINE (YOUR POC LOGIC)
-# ==============================
-def run_pipeline(video_path):
-    print("\n========== PIPELINE START ==========")
+# WebRTC Custom Media Track
+class CameraStreamTrack(MediaStreamTrack):
+    kind = "video"
 
-    with open(video_path, "rb") as f:
-        file_bytes = f.read()
+    def __init__(self):
+        super().__init__()
+        self.pts = 0
 
-    # Step 1: Respiratory + temp + bpm
-    result = process_video(file_bytes)
+    async def recv(self):
+        await asyncio.sleep(1 / 30)
+        while state.latest_frame is None or not state.connected:
+            await asyncio.sleep(0.05)
 
-    print("\n[RESPIRATORY RESULT]")
-    print(result)
+        frame = state.latest_frame.copy()
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        video_frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
 
-    if not result or "final_bpm" not in result:
-        raise Exception("RR analysis failed")
-
-    # Step 2: Heart rate estimation
-    hr_result = estimate_heart_rate(result["final_bpm"])
-    print("\n[HEART RATE RESULT]")
-    print(hr_result)
-
-    # Step 3: Blood pressure prediction
-    bp_result = predict_blood_pressure(
-        body_temp=float(result["body_temperature"]["temp_c_estimate"]),
-        heart_rate=float(hr_result["hr_estimated"]),
-        age=None
-    )
-
-    print("\n[BLOOD PRESSURE RESULT]")
-    print(bp_result)
-
-    # FINAL OUTPUT
-    print("\n========== FINAL OUTPUT ==========")
-    print({
-        "bpm": result["final_bpm"],
-        "body_temperature": result["body_temperature"]["temp_c_estimate"],
-        "heart_rate": hr_result["hr_estimated"],
-        "blood_pressure": bp_result["bp_category"]
-    })
-
-    print("==================================\n")
+        self.pts += int(90000 / 30)
+        video_frame.pts = self.pts
+        video_frame.time_base = fractions.Fraction(1, 90000)
+        return video_frame
 
 
-    final_output = {
-        "bpm": result["final_bpm"],
-        "body_temperature": result["body_temperature"]["temp_c_estimate"],
-        "heart_rate": hr_result["hr_estimated"],
-        "blood_pressure": bp_result["bp_category"]
+# Request Models
+class ConnectRequest(BaseModel):
+    rtspUrl: str
+
+
+class PipelineRequest(BaseModel):
+    pipelineType: str
+
+
+class ModeRequest(BaseModel):
+    mode: int
+
+
+class WebRtcOffer(BaseModel):
+    sdp: str
+    type: str
+
+
+# ==========================================
+# 1. LIVE TELEMETRY STATUS VIA WEBSOCKET
+# ==========================================
+@app.websocket("/ws/status")
+async def websocket_status(websocket: WebSocket):
+    await websocket.accept()
+    print("[INFO] Status WebSocket client connected")
+
+    try:
+        while True:
+            try:
+                # 1. Snapshot raw data safely using list() to prevent "dictionary changed size" exceptions
+                raw_snapshot = dict(list(state.latest_result.items()))
+
+                # 2. Sanitize data (auto-convert NumPy types to clean Python primitives)
+                clean_result = {}
+                for key, val in raw_snapshot.items():
+                    if hasattr(val, "item") and not isinstance(val, (str, int, float, bool, list, dict)):
+                        clean_result[key] = val.item()  # Converts np.float32, np.int64, etc. to native primitives
+                    else:
+                        clean_result[key] = val
+
+                # 3. Handle automated state flag handovers
+                if clean_result.get("thermal_completed"):
+                    state.latest_result.clear()
+
+                # 4. Construct payload
+                payload = {
+                    "connected": state.connected,
+                    "running": state.pipeline_running,
+                    "result": clean_result,
+                    "pipeline": state.pipeline_type
+                }
+
+                # 5. Send out JSON frame
+                await websocket.send_json(payload)
+
+            except RuntimeError:
+                # Catch block handles rare event where the dict shifts sizes while copying; skips frame safely
+                pass
+            except TypeError as json_err:
+                print(f"[WS ERROR] JSON Serialization issue: {json_err}. Verify your AI worker thread variables.")
+            except Exception as loop_err:
+                print(f"[WS ERROR] Latent data stream exception: {loop_err}")
+
+            # Push telemetry frames once every second
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        print("[INFO] Status WebSocket client disconnected")
+    except Exception as critical_err:
+        print(f"[WS CRITICAL] Connection dropped unexpectedly: {critical_err}")
+
+
+# ==========================================
+# 2. VIDEO STREAM VIA WEBRTC
+# ==========================================
+@app.post("/offer")
+async def webrtc_offer(params: WebRtcOffer):
+    offer = RTCSessionDescription(sdp=params.sdp, type=params.type)
+    pc = RTCPeerConnection()
+    pcs.add(pc)
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        if pc.connectionState in ["failed", "closed"]:
+            await pc.close()
+            pcs.discard(pc)
+
+    video_track = CameraStreamTrack()
+    pc.addTrack(video_track)
+
+    await pc.setRemoteDescription(offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    return {
+        "sdp": pc.localDescription.sdp,
+        "type": pc.localDescription.type
     }
 
-    log_run(final_output)
+
+# ==========================================
+# 3. STANDARD SYSTEM HTTP ENDPOINTS
+# ==========================================
+@app.post("/connect")
+def connect_camera(req: ConnectRequest):
+    result = connect(req.rtspUrl)
+    return {"connected": result, "status": "starting"}
 
 
-# ==============================
-# ENTRY POINT
-# ==============================
-if __name__ == "__main__":
+@app.post("/start-pipeline")
+def start_pipeline(req: PipelineRequest):
+    if state.pipeline_running:
+        return {"started": False, "reason": "Pipeline already running"}
+    state.pipeline_type = req.pipelineType
+    state.pipeline_running = True
+    return {"started": True, "pipeline": state.pipeline_type}
 
-    RTSP_URL = "rtsp://admin:admin123@172.20.10.4:8554/streaming/live/1"
 
-    # 1. Capture RTSP → video file
-    video_file = capture_rtsp_to_file(
-        RTSP_URL,
-        duration_sec=30,
-        output_path="output.mp4"
-    )
+@app.post("/disconnect")
+def disconnect_camera():
+    disconnect()
+    return {"connected": False}
 
-    # 2. Run pipeline
-    run_pipeline(video_file)
 
-    # 3. Cleanup (optional)
-    if os.path.exists(video_file):
-        os.remove(video_file)
+@app.post("/set-mode")
+def set_mode(req: ModeRequest):
+    state.mode = req.mode
+    return {"mode": state.mode}
+
+
+@app.post("/reset-pipeline")
+def reset_pipeline():
+    state.pipeline_running = False
+    state.pipeline_type = None
+    time.sleep(0.2)
+    state.latest_result.clear()
+    return {"reset": True}
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    coros = [pc.close() for pc in pcs]
+    await asyncio.gather(*coros)
+    pcs.clear()
+
+
+@app.get("/")
+def root():
+    return {"message": "RTSP WebRTC + WebSocket Backend Running"}

@@ -54,7 +54,7 @@ def predict_blood_pressure(body_temp, heart_rate, age: None):
         # FIXED AGE
         # ---------------------------
         if age is None:
-            age = 30  # default age if not provided
+            age = 25  # default age if not provided
         # ---------------------------
         # SAFE TYPE CONVERSION
         # ---------------------------
